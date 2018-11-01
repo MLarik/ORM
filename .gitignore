@@ -1,4 +1,4 @@
-.gitignore
 test.py
 .DS_Store
 .idea/
+python/__init__.py
