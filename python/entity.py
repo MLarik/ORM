@@ -41,9 +41,15 @@ class Entity(object):
         self.__loaded = False
         self.__modified = False
         self.__table = self.__class__.__name__.lower()
+        self.__created = None
+        self.__updated = None
 
     def __getattr__(self, name):
-        if name in ('_Entity__cursor', '_Entity__fields', '_Entity__loaded', '_Entity__modified', '_Entity__table'):
+        if name in ('_Entity__cursor',
+                    '_Entity__fields',
+                    '_Entity__loaded',
+                    '_Entity__modified',
+                    '_Entity__table'):
             raise AttributeError()
         if self.__modified:
             raise ModifiedError()
@@ -51,8 +57,7 @@ class Entity(object):
             self.__load()
 
         value = self.__fields.get(name)
-        if value is None:
-            raise AttributeError()
+
         return value
 
     def __setattr__(self, name, value):
@@ -61,8 +66,10 @@ class Entity(object):
                  '_Entity__fields',
                  '_Entity__loaded',
                  '_Entity__modified',
-                 '_Entity__table',):
-            self.__dict__[name] = value
+                 '_Entity__table',
+                 '_Entity__created',
+                 '_Entity__updated'):
+            super(Entity, self).__setattr__(name, value)
         else:
             self._set_column(name, value)
             self.__modified = True
@@ -80,43 +87,46 @@ class Entity(object):
         # print(query)
 
         try:
-           fetch = self.__cursor.fetchone()
+            return self.__cursor.fetchone()
         except Exception:
             return None
-        return fetch
 
     def __insert(self):
-        if self.__id is None:
-            gap = ", "
-            keys = self.__fields.keys()
-            values = self.__fields.values()
-            values2 = []
-            for i in values:
-                values2.append(f"'{i}'")
-            self.__id = self.__execute_query(Entity.__insert_query.format(table=self.__table,
-                                                                          columns=gap.join(keys),
-                                                                          placeholders=gap.join(values)))
+        gap = ", "
+        keys = self.__fields.keys()
+        values = self.__fields.values()
+        placeholders = []
+        for i in values:
+            placeholders.append(f"'{i}'")
+
+        self.__id = self.__execute_query(Entity.__insert_query.format(table=self.__table,
+                                                                      columns=gap.join(keys),
+                                                                      placeholders=gap.join(placeholders)))[0]
+        self.__created = self.__execute_query(Entity.__select_query2.format(columns=f"{self.__table}_created", table=self.__table), (self.__id,))[0]
+        self.__updated = self.__execute_query(Entity.__select_query2.format(columns=f"{self.__table}_updated", table=self.__table), (self.__id,))[0]
 
     def __load(self):
         if not self.__loaded and not(self.__id is None):
             values = self.__execute_query(Entity.__select_query.format(table=self.__table), (self.__id,))
+            self.__created = values[f'{self.__table}_created']
+            self.__updated = values[f'{self.__table}_updated']
 
             self.__fields.update(values)
             self.__loaded = True
 
-    def __update(self):  # !!!!!!!!!!!!!!
-        if not (self.id is None):
-            gap = ', '
-            keys = list(self.__fields.keys())
-            values = list(self.__fields.values())
-            columns = []
+    def __update(self):
+        gap = ', '
+        keys = list(self.__fields.keys())
+        values = list(self.__fields.values())
+        columns = []
 
-            i = 0
-            while i < len(keys):
-                columns.append(f"{keys[i]}='{values[i]}'")
-                i += 1
+        i = 0
+        while i < len(keys):
+            columns.append(f"{keys[i]}='{values[i]}'")
+            i += 1
 
-            self.__execute_query(Entity.__update_query.format(table=self.__table, columns=gap.join(columns)), (self.__id,))
+        self.__execute_query(Entity.__update_query.format(table=self.__table, columns=gap.join(columns)), (self.__id,))
+        self.__updated = self.__execute_query(Entity.__select_query2.format(columns=f"{self.__table}_updated", table=self.__table), (self.__id,))[0]
 
     def _get_column(self, name):
         return self.__fields[f'{self.__table}_{name}']
@@ -151,15 +161,23 @@ class Entity(object):
 
     @property
     def id(self):
+        if not self.__loaded:
+            self.__load()
         return self.__id
 
     @property
     def created(self):
-        return self.__execute_query(Entity.__select_query2.format(columns=f"{self.__table}_created", table=self.__table), (self.__id,))[0]
+        if self.__id is None:
+            raise DatabaseError()
+        if not self.__loaded:
+            self.__load()
+        return self.__created
 
     @property
     def updated(self):
-        return self.__execute_query(Entity.__select_query2.format(columns=f"{self.__table}_updated", table=self.__table), (self.__id,))[0]
+        if not self.__loaded:
+            self.__load()
+        return self.__updated
 
     def save(self):
         if self.__id is None:
@@ -172,5 +190,3 @@ class Entity(object):
 
 # class Section(Entity):
 #     _columns = ['title']
-
-
