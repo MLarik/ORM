@@ -22,12 +22,15 @@ class Entity(object):
         raise DatabaseError()
 
     __delete_query = 'DELETE FROM "{table}" WHERE {table}_id=%s'
-    __insert_query = 'INSERT INTO "{table}" ({columns}) VALUES ({placeholders}) RETURNING "{table}_id"'
+    __insert_query = 'INSERT INTO "{table}" ({columns}) VALUES ({placeholders}) ' \
+                     'RETURNING ' \
+                     '"{table}_id", ' \
+                     '"{table}_created"'
     __list_query = 'SELECT * FROM "{table}"'
     __select_query = 'SELECT * FROM "{table}" WHERE "{table}_id"=%s'
-    __update_query = 'UPDATE "{table}" SET {columns} WHERE {table}_id=%s'
+    __update_query = 'UPDATE "{table}" SET {columns} WHERE {table}_id=%s RETURNING "{table}_updated"'
     __select_query2 = 'SELECT {columns} FROM {table} WHERE {table}_id=%s'
-    __count_query = 'SELECT COUNT(*) FROM "{table}"'
+    __columns_query = "SELECT column_name FROM information_schema.columns WHERE table_name = '{table}'"
 
     def __init__(self, id=None):
         if self.__class__.db is None:
@@ -45,30 +48,32 @@ class Entity(object):
         self.__updated = None
 
     def __getattr__(self, name):
-        if name in ('_Entity__cursor',
+        if name in ('_Entity__id',
+                    '_Entity__cursor',
                     '_Entity__fields',
                     '_Entity__loaded',
                     '_Entity__modified',
-                    '_Entity__table'):
+                    '_Entity__table',
+                    '_Entity__created',
+                    '_Entity__updated'):
             raise AttributeError()
         if self.__modified:
             raise ModifiedError()
-        if not self.__loaded:
-            self.__load()
+        self.__load()
 
         value = self.__fields.get(name)
 
         return value
 
     def __setattr__(self, name, value):
-        if not (hasattr(self, '_Entity__table')) or name in \
-                ('_Entity__cursor',
-                 '_Entity__fields',
-                 '_Entity__loaded',
-                 '_Entity__modified',
-                 '_Entity__table',
-                 '_Entity__created',
-                 '_Entity__updated'):
+        if name in ('_Entity__id',
+                    '_Entity__cursor',
+                    '_Entity__fields',
+                    '_Entity__loaded',
+                    '_Entity__modified',
+                    '_Entity__table',
+                    '_Entity__created',
+                    '_Entity__updated'):
             super(Entity, self).__setattr__(name, value)
         else:
             self._set_column(name, value)
@@ -76,7 +81,7 @@ class Entity(object):
 
     def __execute_query(self, query, args=None):
         try:
-            if not(args is None):
+            if not (args is None):
                 self.__cursor.execute(query, args)
             else:
                 self.__cursor.execute(query)
@@ -87,27 +92,28 @@ class Entity(object):
         # print(query)
 
         try:
-            return self.__cursor.fetchone()
+            return self.__cursor.fetchall()[0]
         except Exception:
             return None
 
     def __insert(self):
-        gap = ", "
         keys = self.__fields.keys()
         values = self.__fields.values()
         placeholders = []
         for i in values:
             placeholders.append(f"'{i}'")
 
-        self.__id = self.__execute_query(Entity.__insert_query.format(table=self.__table,
-                                                                      columns=gap.join(keys),
-                                                                      placeholders=gap.join(placeholders)))[0]
-        self.__created = self.__execute_query(Entity.__select_query2.format(columns=f"{self.__table}_created", table=self.__table), (self.__id,))[0]
-        self.__updated = self.__execute_query(Entity.__select_query2.format(columns=f"{self.__table}_updated", table=self.__table), (self.__id,))[0]
+        values = self.__execute_query(Entity.__insert_query.format(table=self.__table,
+                                                                   columns=', '.join(keys),
+                                                                   placeholders=', '.join(placeholders)))
+        self.__id = values[f'{self.__table}_id']
+        self.__created = values[f'{self.__table}_created']
+        self.__updated = self.__created
 
     def __load(self):
-        if not self.__loaded and not(self.__id is None):
+        if not self.__loaded and not (self.__id is None):
             values = self.__execute_query(Entity.__select_query.format(table=self.__table), (self.__id,))
+
             self.__created = values[f'{self.__table}_created']
             self.__updated = values[f'{self.__table}_updated']
 
@@ -115,7 +121,6 @@ class Entity(object):
             self.__loaded = True
 
     def __update(self):
-        gap = ', '
         keys = list(self.__fields.keys())
         values = list(self.__fields.values())
         columns = []
@@ -125,8 +130,10 @@ class Entity(object):
             columns.append(f"{keys[i]}='{values[i]}'")
             i += 1
 
-        self.__execute_query(Entity.__update_query.format(table=self.__table, columns=gap.join(columns)), (self.__id,))
-        self.__updated = self.__execute_query(Entity.__select_query2.format(columns=f"{self.__table}_updated", table=self.__table), (self.__id,))[0]
+        result = self.__execute_query(Entity.__update_query.format(table=self.__table, columns=', '.join(columns)),
+                                      (self.__id,))
+
+        self.__updated = result[f'{self.__table}_updated']
 
     def _get_column(self, name):
         return self.__fields[f'{self.__table}_{name}']
@@ -142,12 +149,27 @@ class Entity(object):
             cursor_factory=psycopg2.extras.DictCursor
         )
 
-        temp_cursor.execute(cls.__count_query.format(table=cls.__name__.lower()))
-        limit = temp_cursor.fetchone()[0]
+        temp_cursor.execute(cls.__list_query.format(table=cls.__name__.lower()))
+        data = temp_cursor.fetchall()
+        temp_cursor.execute(cls.__columns_query.format(table=cls.__name__.lower()))
+        keys = temp_cursor.fetchall()
 
-        i = 1
-        while i <= limit:
-            instances.append(cls(i))
+        # this loop should write values ​​to instances of the class and should assign loaded = True
+        i = 0
+
+        while i < len(data):
+            temp_inst = cls()
+            temp_inst._Entity__loaded = True
+            temp_fields = {}
+
+            j = 0
+            while j < len(data[i]):
+                temp_fields[keys[j][0]] = data[i][j]
+
+                j += 1
+            temp_inst._Entity__fields.update(temp_fields)
+            instances.append(temp_inst)
+
             i += 1
 
         return instances
@@ -161,22 +183,19 @@ class Entity(object):
 
     @property
     def id(self):
-        if not self.__loaded:
-            self.__load()
+        self.__load()
         return self.__id
 
     @property
     def created(self):
         if self.__id is None:
             raise DatabaseError()
-        if not self.__loaded:
-            self.__load()
+        self.__load()
         return self.__created
 
     @property
     def updated(self):
-        if not self.__loaded:
-            self.__load()
+        self.__load()
         return self.__updated
 
     def save(self):
@@ -188,5 +207,12 @@ class Entity(object):
             self.__modified = False
 
 
-# class Section(Entity):
-#     _columns = ['title']
+class Section(Entity):
+    _columns = ['title']
+
+
+if __name__ == "__main__":
+    s = Section(155)
+
+    for s in Section.all():
+        print(s.section_title)
